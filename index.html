@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocSum</title>
+<style>
+:root{--bg:#f3f5f2;--panel:#fff;--ink:#17201b;--mute:#5d6b63;--line:#d5ddd7;--accent:#1f5f4a;--accent-ink:#fff;--warn:#8a5a00;--err:#a12a2a}
+@media(prefers-color-scheme:dark){:root{--bg:#121714;--panel:#1a211d;--ink:#e8efe9;--mute:#9aa8a0;--line:#2c3731;--accent:#5fc4a0;--accent-ink:#0c1511;--warn:#e0b050;--err:#ff8a8a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 Georgia,"Iowan Old Style",serif}
+main{max-width:860px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:30px;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--mute);margin:0 0 22px;font-family:system-ui,sans-serif;font-size:14px}
+#drop{border:2px dashed var(--line);border-radius:10px;background:var(--panel);padding:34px 18px;text-align:center;cursor:pointer;font-family:system-ui,sans-serif}
+#drop.over{border-color:var(--accent)}
+#drop strong{display:block;font-size:17px;margin-bottom:4px}
+#drop span{color:var(--mute);font-size:14px}
+#fname{margin-top:10px;font-family:system-ui,sans-serif;font-size:14px;color:var(--accent);word-break:break-all}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0;font-family:system-ui,sans-serif}
+label{display:flex;flex-direction:column;font-size:13px;color:var(--mute);gap:4px;flex:1;min-width:140px}
+select,input[type=text]{font:inherit;font-size:15px;padding:9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)}
+button{font:600 16px system-ui,sans-serif;background:var(--accent);color:var(--accent-ink);border:0;border-radius:8px;padding:12px 22px;cursor:pointer;width:100%}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible,select:focus-visible,input:focus-visible,#drop:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+#status,.note{font-family:system-ui,sans-serif;font-size:14px;color:var(--mute);margin-top:14px}
+.note{color:var(--warn);margin-top:6px}
+#err{color:var(--err);font-family:system-ui,sans-serif;margin-top:14px}
+#out{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 22px;margin-top:18px;min-height:0}
+#out:empty{display:none}
+#out h2,#out h3{font-size:19px;margin:18px 0 6px}
+#out p{margin:10px 0}
+#out ul{padding-left:22px}
+#copy{margin-top:12px;width:auto;background:transparent;color:var(--ink);border:1px solid var(--line);padding:8px 14px;font-size:14px;display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>DocSum</h1>
+  <p class="sub">Summarise PDFs, spreadsheets, Word and PowerPoint files, images, audio and video with a local Gemma model.</p>
+
+  <div id="drop" tabindex="0" role="button" aria-label="Choose a file">
+    <strong>Drop a file here or tap to choose</strong>
+    <span>PDF, DOCX, PPTX, XLSX/CSV, TXT, HTML, images, MP3/WAV, MP4</span>
+    <div id="fname"></div>
+  </div>
+  <input type="file" id="file" hidden>
+
+  <div class="row">
+    <label>Model <select id="model"></select></label>
+    <label>Summary style
+      <select id="style">
+        <option value="concise">Concise</option>
+        <option value="bullets">Key points</option>
+        <option value="detailed">Detailed</option>
+        <option value="executive">Executive brief</option>
+      </select></label>
+    <label>Language <input type="text" id="lang" value="English"></label>
+  </div>
+  <div class="row"><label>Focus on (optional) <input type="text" id="focus" placeholder="e.g. costs, deadlines, risks"></label></div>
+
+  <button id="go" disabled>Summarise</button>
+  <div id="status" aria-live="polite"></div>
+  <div id="notes"></div>
+  <div id="err" role="alert"></div>
+  <div id="out"></div>
+  <button id="copy">Copy summary</button>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let file = null, raw = "";
+
+fetch("/api/models").then(r => r.json()).then(d => {
+  $("model").innerHTML = d.models.map(m => `<option ${m === d.default ? "selected" : ""}>${m}</option>`).join("");
+  if (!d.ollama) $("err").textContent = "Ollama is not reachable. Start it with `ollama serve`.";
+});
+
+function setFile(f){ file = f; $("fname").textContent = f ? f.name : ""; $("go").disabled = !f; }
+$("drop").onclick = () => $("file").click();
+$("drop").onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("file").click(); } };
+$("file").onchange = e => setFile(e.target.files[0]);
+["dragover","dragenter"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave","drop"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.remove("over"); }));
+$("drop").addEventListener("drop", e => setFile(e.dataTransfer.files[0]));
+
+const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+function md(t){
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/\*(.+?)\*/g,"<i>$1</i>").replace(/`(.+?)`/g,"<code>$1</code>");
+  let html = "", inList = false;
+  for (const line of t.split("\n")) {
+    const li = line.match(/^\s*[-*•]\s+(.*)/), h = line.match(/^#{1,4}\s+(.*)/);
+    if (li) { if (!inList) { html += "<ul>"; inList = true; } html += `<li>${inline(li[1])}</li>`; continue; }
+    if (inList) { html += "</ul>"; inList = false; }
+    if (h) html += `<h2>${inline(h[1])}</h2>`;
+    else if (line.trim()) html += `<p>${inline(line)}</p>`;
+  }
+  return html + (inList ? "</ul>" : "");
+}
+
+$("go").onclick = async () => {
+  raw = ""; $("out").innerHTML = ""; $("err").textContent = ""; $("notes").innerHTML = ""; $("copy").style.display = "none";
+  $("go").disabled = true;
+  const fd = new FormData();
+  fd.append("file", file); fd.append("model", $("model").value); fd.append("style", $("style").value);
+  fd.append("language", $("lang").value || "English"); fd.append("focus", $("focus").value);
+  try {
+    const res = await fetch("/api/summarize", { method: "POST", body: fd });
+    if (!res.ok) { $("err").textContent = (await res.json()).error || "Request failed"; return; }
+    const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+    while (true) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, i); buf = buf.slice(i + 2);
+        const ev = block.match(/^event: (.*)/m)[1], data = JSON.parse(block.match(/^data: (.*)/m)[1]);
+        if (ev === "status") $("status").textContent = data;
+        else if (ev === "note") $("notes").insertAdjacentHTML("beforeend", `<div class="note">${esc(data)}</div>`);
+        else if (ev === "token") { raw += data; $("out").innerHTML = md(raw); }
+        else if (ev === "error") $("err").textContent = data;
+        else if (ev === "done") { $("status").textContent = "Done."; $("copy").style.display = "inline-block"; }
+      }
+    }
+  } catch (e) { $("err").textContent = e.message; }
+  finally { $("go").disabled = !file; }
+};
+$("copy").onclick = () => { navigator.clipboard.writeText(raw); $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy summary", 1500); };
+</script>
+</body>
+</html>
